@@ -1,0 +1,20 @@
+# 환경변수 (토큰 등 비밀정보) - 절대 GitHub에 올리지 말 것
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
