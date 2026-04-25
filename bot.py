@@ -32,10 +32,10 @@ KST = pytz.timezone("Asia/Seoul")
 # (카테고리, [(표시이름, 야후 티커), ...])
 TICKER_GROUPS = [
     ("미국 지수", [
-        ("S&P 500",   "^GSPC"),
-        ("나스닥",    "^IXIC"),
-        ("다우존스",  "^DJI"),
-        ("러셀 2000", "^RUT"),
+        ("S&P 500",  "^GSPC"),
+        ("나스닥",   "^IXIC"),
+        ("다우존스", "^DJI"),
+        ("러셀2000", "^RUT"),
     ]),
     ("한국 지수", [
         ("코스피", "^KS11"),
@@ -46,19 +46,19 @@ TICKER_GROUPS = [
         ("브렌트", "BZ=F"),
     ]),
     ("환율", [
-        ("달러/원 (USD/KRW)", "KRW=X"),
-        ("유로/원 (EUR/KRW)", "EURKRW=X"),
-        ("엔화/원 (JPY/KRW)", "JPYKRW=X"),
-        ("위안/원 (CNY/KRW)", "CNYKRW=X"),
+        ("달러/원", "KRW=X"),
+        ("유로/원", "EURKRW=X"),
+        ("엔화/원", "JPYKRW=X"),
+        ("위안/원", "CNYKRW=X"),
     ]),
     # 국채는 가격 변동을 보기 위해 ETF를 사용 (yield가 아닌 price 기준)
     ("미국 국채", [
-        ("미국 단기채 (1-3Y)",    "SHY"),
-        ("미국 10년물채권 (지수)", "TLT"),
+        ("미국 단기채", "SHY"),
+        ("미국 장기채", "TLT"),
     ]),
     ("한국 국채", [
-        ("한국 단기채 (3년물)",    "114470.KS"),
-        ("한국 10년물채권 (지수)", "167860.KS"),
+        ("한국 단기채", "114470.KS"),
+        ("한국 장기채", "167860.KS"),
     ]),
 ]
 
@@ -79,14 +79,23 @@ def fetch_quote(ticker: str) -> Optional[dict]:
         return None
 
 
+# Discord ANSI 색상 (```ansi 블록 안에서만 동작)
+GREEN = "\u001b[32m"
+RED   = "\u001b[31m"
+RESET = "\u001b[0m"
+
+
 def format_line(name: str, q: Optional[dict]) -> str:
     if q is None:
-        return f"`{name:<28}`  데이터 없음"
+        return f"{name}  데이터 없음"
     arrow = "🟢▲" if q["change"] > 0 else ("🔴▼" if q["change"] < 0 else "⬜➖")
     sign  = "+" if q["change"] >= 0 else ""
+    color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else "")
+    reset = RESET if color else ""
+    # 이름·가격·이모지는 흰색, 퍼센트(%)만 색상
     return (
-        f"`{name:<28}`  {q['last']:>10,.2f}  "
-        f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
+        f"{name}  {q['last']:,.2f}  {arrow} "
+        f"{sign}{q['change']:,.2f} {color}({sign}{q['pct']:.2f}%){reset}"
     )
 
 
@@ -99,7 +108,8 @@ def build_embed() -> discord.Embed:
     )
     for category, items in TICKER_GROUPS:
         lines = [format_line(name, fetch_quote(tk)) for name, tk in items]
-        embed.add_field(name=f"**{category}**", value="\n".join(lines), inline=False)
+        value = "```ansi\n" + "\n".join(lines) + "\n```"
+        embed.add_field(name=f"**{category}**", value=value, inline=False)
     embed.set_footer(text="Source: Yahoo Finance (yfinance)")
     return embed
 
