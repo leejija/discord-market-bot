@@ -87,15 +87,16 @@ RESET = "\u001b[0m"
 
 def format_line(name: str, q: Optional[dict]) -> str:
     if q is None:
-        return f"  {name:<26}  데이터 없음"
-    arrow = "▲" if q["change"] > 0 else ("▼" if q["change"] < 0 else "—")
+        return f"`{name:<28}`  데이터 없음"
+    arrow = "🔺" if q["change"] > 0 else ("🔻" if q["change"] < 0 else "➖")
     sign  = "+" if q["change"] >= 0 else ""
-    color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else RESET)
-    text  = (
-        f"  {name:<26}  {q['last']:>12,.2f}  "
+    color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else "")
+    reset = RESET if color else ""
+    numbers = (
+        f"{q['last']:>10,.2f}  "
         f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
     )
-    return f"{color}{text}{RESET}"
+    return f"`{name:<28}`  {color}{numbers}{reset}"
 
 
 def build_embed() -> discord.Embed:
