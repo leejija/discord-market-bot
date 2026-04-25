@@ -45,6 +45,12 @@ TICKER_GROUPS = [
         ("WTI",   "CL=F"),
         ("브렌트", "BZ=F"),
     ]),
+    ("환율 (달러 기준)", [
+        ("달러/원화  (USD/KRW)", "KRW=X"),
+        ("달러/엔    (USD/JPY)", "JPY=X"),
+        ("달러/위안  (USD/CNY)", "CNY=X"),
+        ("달러/유로  (USD/EUR)", "EURUSD=X"),
+    ]),
     # 국채는 가격 변동을 보기 위해 ETF를 사용 (yield가 아닌 price 기준)
     ("미국 국채", [
         ("미국 단기 (SHY, 1-3Y)",  "SHY"),
