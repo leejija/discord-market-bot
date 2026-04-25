@@ -79,15 +79,23 @@ def fetch_quote(ticker: str) -> Optional[dict]:
         return None
 
 
+# Discord ANSI 색상 코드 (```ansi 블록 안에서만 작동)
+GREEN = "\u001b[32m"   # 상승 → 초록
+RED   = "\u001b[31m"   # 하락 → 빨강
+RESET = "\u001b[0m"
+
+
 def format_line(name: str, q: Optional[dict]) -> str:
     if q is None:
-        return f"`{name:<28}`  데이터 없음"
-    arrow = "🔺" if q["change"] > 0 else ("🔻" if q["change"] < 0 else "➖")
-    sign = "+" if q["change"] >= 0 else ""
-    return (
-        f"`{name:<28}`  {q['last']:>10,.2f}  "
+        return f"  {name:<26}  데이터 없음"
+    arrow = "▲" if q["change"] > 0 else ("▼" if q["change"] < 0 else "—")
+    sign  = "+" if q["change"] >= 0 else ""
+    color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else RESET)
+    text  = (
+        f"  {name:<26}  {q['last']:>12,.2f}  "
         f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
     )
+    return f"{color}{text}{RESET}"
 
 
 def build_embed() -> discord.Embed:
@@ -99,7 +107,9 @@ def build_embed() -> discord.Embed:
     )
     for category, items in TICKER_GROUPS:
         lines = [format_line(name, fetch_quote(tk)) for name, tk in items]
-        embed.add_field(name=f"**{category}**", value="\n".join(lines), inline=False)
+        # ```ansi 블록으로 감싸야 Discord에서 ANSI 색상이 적용됨
+        value = "```ansi\n" + "\n".join(lines) + "\n```"
+        embed.add_field(name=f"**{category}**", value=value, inline=False)
     embed.set_footer(text="Source: Yahoo Finance (yfinance)")
     return embed
 
