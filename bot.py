@@ -92,11 +92,8 @@ def format_line(name: str, q: Optional[dict]) -> str:
     sign  = "+" if q["change"] >= 0 else ""
     color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else "")
     reset = RESET if color else ""
-    numbers = (
-        f"{q['last']:>10,.2f}  "
-        f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
-    )
-    return f"`{name:<28}`  {color}{numbers}{reset}"
+    change_str = f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
+    return f"`{name:<28}`  {q['last']:>10,.2f}  {color}{change_str}{reset}"
 
 
 def build_embed() -> discord.Embed:
