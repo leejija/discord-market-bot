@@ -46,19 +46,19 @@ TICKER_GROUPS = [
         ("브렌트", "BZ=F"),
     ]),
     ("환율", [
-        ("달러/원   (USD/KRW)", "KRW=X"),
-        ("유로/원   (EUR/KRW)", "EURKRW=X"),
-        ("엔화/원   (JPY/KRW)", "JPYKRW=X"),
-        ("위안/원   (CNY/KRW)", "CNYKRW=X"),
+        ("달러/원 (USD/KRW)", "KRW=X"),
+        ("유로/원 (EUR/KRW)", "EURKRW=X"),
+        ("엔화/원 (JPY/KRW)", "JPYKRW=X"),
+        ("위안/원 (CNY/KRW)", "CNYKRW=X"),
     ]),
     # 국채는 가격 변동을 보기 위해 ETF를 사용 (yield가 아닌 price 기준)
     ("미국 국채", [
-        ("미국 단기 (SHY, 1-3Y)",  "SHY"),
-        ("미국 장기 (TLT, 20Y+)",  "TLT"),
+        ("미국 단기채 (1-3Y)",    "SHY"),
+        ("미국 10년물채권 (지수)", "TLT"),
     ]),
     ("한국 국채", [
-        ("한국 단기 (KOSEF 국고채3년)",   "114470.KS"),
-        ("한국 장기 (KODEX 국채선물10년)", "167860.KS"),
+        ("한국 단기채 (3년물)",    "114470.KS"),
+        ("한국 10년물채권 (지수)", "167860.KS"),
     ]),
 ]
 
@@ -79,22 +79,15 @@ def fetch_quote(ticker: str) -> Optional[dict]:
         return None
 
 
-# Discord ANSI 색상 코드
-GREEN = "\u001b[32m"
-RED   = "\u001b[31m"
-RESET = "\u001b[0m"
-
-
 def format_line(name: str, q: Optional[dict]) -> str:
     if q is None:
-        return f"{name}  데이터 없음"
+        return f"`{name:<28}`  데이터 없음"
     arrow = "🟢▲" if q["change"] > 0 else ("🔴▼" if q["change"] < 0 else "⬜➖")
     sign  = "+" if q["change"] >= 0 else ""
-    color = GREEN if q["change"] > 0 else (RED if q["change"] < 0 else "")
-    reset = RESET if color else ""
-    # 가격은 흰색, 변동값+%만 색상
-    change_str = f"{sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
-    return f"{name}  {q['last']:,.2f}  {arrow} {color}{change_str}{reset}"
+    return (
+        f"`{name:<28}`  {q['last']:>10,.2f}  "
+        f"{arrow} {sign}{q['change']:,.2f} ({sign}{q['pct']:.2f}%)"
+    )
 
 
 def build_embed() -> discord.Embed:
@@ -106,8 +99,7 @@ def build_embed() -> discord.Embed:
     )
     for category, items in TICKER_GROUPS:
         lines = [format_line(name, fetch_quote(tk)) for name, tk in items]
-        value = "```ansi\n" + "\n".join(lines) + "\n```"
-        embed.add_field(name=f"**{category}**", value=value, inline=False)
+        embed.add_field(name=f"**{category}**", value="\n".join(lines), inline=False)
     embed.set_footer(text="Source: Yahoo Finance (yfinance)")
     return embed
 
