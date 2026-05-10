@@ -444,9 +444,14 @@ async def on_ready():
     try:
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
+            # 1) 길드 스코프로 명령어 동기화 (즉시 반영)
             tree.copy_global_to(guild=guild)
             synced = await tree.sync(guild=guild)
             log.info("길드(%s) 슬래시 명령어 동기화 완료: %d개", GUILD_ID, len(synced))
+            # 2) 글로벌 스코프에 남아있는 중복 명령어 제거 (자동완성에 두 번 뜨는 문제 방지)
+            tree.clear_commands(guild=None)
+            await tree.sync()
+            log.info("글로벌 스코프 슬래시 명령어 정리 완료 (중복 제거)")
         else:
             synced = await tree.sync()
             log.info("글로벌 슬래시 명령어 동기화 완료: %d개 (반영까지 최대 1시간)", len(synced))
