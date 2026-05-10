@@ -213,7 +213,7 @@ def fetch_top_movers(tickers: list, n: int = 3) -> list:
 
 
 def fetch_news(ticker: str, n: int = 3) -> list:
-    """yfinance 뉴스에서 최근 n개 헤드라인. 실패 시 빈 리스트."""
+    """yfinance 뉴스에서 최근 n개 헤드라인 + 요약. 실패 시 빈 리스트."""
     try:
         raw = yf.Ticker(ticker).news or []
     except Exception as e:
@@ -225,6 +225,7 @@ def fetch_news(ticker: str, n: int = 3) -> list:
         content = item.get("content") if isinstance(item, dict) else None
         if isinstance(content, dict):
             title = content.get("title") or ""
+            summary = content.get("summary") or content.get("description") or ""
             link = (
                 (content.get("clickThroughUrl") or {}).get("url")
                 or (content.get("canonicalUrl") or {}).get("url")
@@ -233,13 +234,18 @@ def fetch_news(ticker: str, n: int = 3) -> list:
             publisher = (content.get("provider") or {}).get("displayName") or ""
         else:
             title = item.get("title") or ""
+            summary = item.get("summary") or ""
             link = item.get("link") or ""
             publisher = item.get("publisher") or ""
         if not title:
             continue
         if len(title) > 70:
             title = title[:67] + "…"
-        out.append({"title": title, "link": link, "publisher": publisher})
+        # 요약은 디스코드 임베드에 맞춰 짧게 자름 (한 줄 ~180자)
+        summary = " ".join(summary.split())  # 줄바꿈/중복 공백 정리
+        if len(summary) > 180:
+            summary = summary[:177] + "…"
+        out.append({"title": title, "link": link, "publisher": publisher, "summary": summary})
         if len(out) >= n:
             break
     return out
@@ -279,16 +285,22 @@ def build_summary_embed(market: str) -> discord.Embed:
         movers_value = "데이터 없음"
     embed.add_field(name="🔥 주요 종목 등락 (Top 3)", value=movers_value, inline=False)
 
-    # 2) 주요 뉴스 3개
+    # 2) 주요 뉴스 3개 (제목 + 요약 + 링크)
     news = fetch_news(news_ticker, n=3)
     if news:
-        bullets = []
+        blocks = []
         for i, n in enumerate(news, 1):
-            line = f"{i}. [{n['title']}]({n['link']})" if n["link"] else f"{i}. {n['title']}"
+            head = f"**{i}.** [{n['title']}]({n['link']})" if n["link"] else f"**{i}.** {n['title']}"
             if n["publisher"]:
-                line += f" — *{n['publisher']}*"
-            bullets.append(line)
-        news_value = "\n".join(bullets)
+                head += f" — *{n['publisher']}*"
+            block = head
+            if n.get("summary"):
+                block += f"\n> {n['summary']}"
+            blocks.append(block)
+        news_value = "\n\n".join(blocks)
+        # Discord embed field 1024자 제한 보호
+        if len(news_value) > 1020:
+            news_value = news_value[:1017] + "…"
     else:
         news_value = "뉴스 데이터 없음"
     embed.add_field(name="📌 주요 뉴스", value=news_value, inline=False)
