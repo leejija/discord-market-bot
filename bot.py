@@ -27,6 +27,8 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # 0이면 글로벌 sync (느림)
 POST_TIME = os.getenv("POST_TIME", "07:00")
+KR_SUMMARY_TIME = os.getenv("KR_SUMMARY_TIME", "20:00")  # 코스피 NXT 마감 후
+US_SUMMARY_TIME = os.getenv("US_SUMMARY_TIME", "06:00")  # 미국 정규장 마감 후
 KST = pytz.timezone("Asia/Seoul")
 
 # (카테고리, [(표시이름, 야후 티커), ...])
@@ -61,6 +63,65 @@ TICKER_GROUPS = [
         ("한국 장기채", "167860.KS"),
     ]),
 ]
+
+# 시장별 워치리스트 (top movers 계산용)
+US_WATCHLIST = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "META", "TSLA", "NVDA",
+    "JPM", "V", "JNJ", "WMT", "PG", "MA", "HD", "BAC", "XOM",
+    "AVGO", "LLY", "UNH", "COST", "ORCL", "NFLX", "AMD", "INTC",
+    "DIS", "BA", "GS", "CAT", "MCD", "KO",
+]
+KR_WATCHLIST = [
+    "005930.KS",  # 삼성전자
+    "000660.KS",  # SK하이닉스
+    "035420.KS",  # NAVER
+    "035720.KS",  # 카카오
+    "005380.KS",  # 현대차
+    "000270.KS",  # 기아
+    "005490.KS",  # POSCO홀딩스
+    "051910.KS",  # LG화학
+    "006400.KS",  # 삼성SDI
+    "068270.KS",  # 셀트리온
+    "207940.KS",  # 삼성바이오로직스
+    "105560.KS",  # KB금융
+    "055550.KS",  # 신한지주
+    "066570.KS",  # LG전자
+    "012330.KS",  # 현대모비스
+    "028260.KS",  # 삼성물산
+    "032830.KS",  # 삼성생명
+    "017670.KS",  # SK텔레콤
+    "015760.KS",  # 한국전력
+    "003670.KS",  # 포스코퓨처엠
+]
+
+# 종목명 캐시 (yf.Ticker.info 호출이 느려서 모듈 단위로 캐시)
+_TICKER_NAME_CACHE: dict[str, str] = {
+    # 한국 종목은 yfinance가 영어 이름을 주는 경우가 많아 미리 한글로 매핑
+    "005930.KS": "삼성전자",
+    "000660.KS": "SK하이닉스",
+    "035420.KS": "NAVER",
+    "035720.KS": "카카오",
+    "005380.KS": "현대차",
+    "000270.KS": "기아",
+    "005490.KS": "POSCO홀딩스",
+    "051910.KS": "LG화학",
+    "006400.KS": "삼성SDI",
+    "068270.KS": "셀트리온",
+    "207940.KS": "삼성바이오로직스",
+    "105560.KS": "KB금융",
+    "055550.KS": "신한지주",
+    "066570.KS": "LG전자",
+    "012330.KS": "현대모비스",
+    "028260.KS": "삼성물산",
+    "032830.KS": "삼성생명",
+    "017670.KS": "SK텔레콤",
+    "015760.KS": "한국전력",
+    "003670.KS": "포스코퓨처엠",
+}
+
+# 뉴스 소스 티커 (시장별 대표 ETF — yfinance 뉴스가 풍부)
+NEWS_TICKER_US = "SPY"
+NEWS_TICKER_KR = "EWY"
 
 
 def fetch_quote(ticker: str) -> Optional[dict]:
@@ -114,6 +175,128 @@ def build_embed() -> discord.Embed:
     return embed
 
 
+# ============================================================
+#  증시 이슈 요약 (Top movers + 뉴스 헤드라인)
+# ============================================================
+
+def _resolve_name(ticker: str) -> str:
+    """티커 → 표시 이름. 캐시 → yfinance.info → ticker 순으로 fallback."""
+    if ticker in _TICKER_NAME_CACHE:
+        return _TICKER_NAME_CACHE[ticker]
+    try:
+        info = yf.Ticker(ticker).info or {}
+        name = info.get("shortName") or info.get("longName") or ticker
+    except Exception:
+        name = ticker
+    _TICKER_NAME_CACHE[ticker] = name
+    return name
+
+
+def fetch_top_movers(tickers: list, n: int = 3) -> list:
+    """워치리스트에서 |% 변동| 상위 n개 반환.
+    각 항목: {"ticker", "name", "last", "change", "pct"}.
+    실패한 티커는 건너뛴다."""
+    results = []
+    for tk in tickers:
+        q = fetch_quote(tk)
+        if q is None:
+            continue
+        results.append({
+            "ticker": tk,
+            "name": _resolve_name(tk),
+            "last": q["last"],
+            "change": q["change"],
+            "pct": q["pct"],
+        })
+    results.sort(key=lambda r: abs(r["pct"]), reverse=True)
+    return results[:n]
+
+
+def fetch_news(ticker: str, n: int = 3) -> list:
+    """yfinance 뉴스에서 최근 n개 헤드라인. 실패 시 빈 리스트."""
+    try:
+        raw = yf.Ticker(ticker).news or []
+    except Exception as e:
+        log.warning("fetch_news(%s) 실패: %s", ticker, e)
+        return []
+    out = []
+    for item in raw[:n * 2]:  # 충분히 가져온 뒤 필터
+        # yfinance 신/구 응답 포맷 둘 다 호환
+        content = item.get("content") if isinstance(item, dict) else None
+        if isinstance(content, dict):
+            title = content.get("title") or ""
+            link = (
+                (content.get("clickThroughUrl") or {}).get("url")
+                or (content.get("canonicalUrl") or {}).get("url")
+                or ""
+            )
+            publisher = (content.get("provider") or {}).get("displayName") or ""
+        else:
+            title = item.get("title") or ""
+            link = item.get("link") or ""
+            publisher = item.get("publisher") or ""
+        if not title:
+            continue
+        if len(title) > 70:
+            title = title[:67] + "…"
+        out.append({"title": title, "link": link, "publisher": publisher})
+        if len(out) >= n:
+            break
+    return out
+
+
+def _format_mover_line(m: dict, korean: bool) -> str:
+    """top mover 한 줄 포맷. 한국 종목은 정수, 미국 종목은 소수 둘째 자리."""
+    arrow = "🟢▲" if m["change"] > 0 else ("🔴▼" if m["change"] < 0 else "⬜➖")
+    sign = "+" if m["pct"] >= 0 else ""
+    color = GREEN if m["pct"] > 0 else (RED if m["pct"] < 0 else "")
+    reset = RESET if color else ""
+    price_fmt = f"{m['last']:,.0f}" if korean else f"{m['last']:,.2f}"
+    return f"{m['name']:<12} {price_fmt:>10}  {arrow} {color}{sign}{m['pct']:.2f}%{reset}"
+
+
+def build_summary_embed(market: str) -> discord.Embed:
+    """market: 'kr' 또는 'us'. 종목 등락 Top 3 + 뉴스 헤드라인 3개를 임베드로."""
+    is_kr = market == "kr"
+    title = "📰 한국 증시 요약" if is_kr else "📰 미국 증시 요약"
+    color = 0x3498db if is_kr else 0xe67e22
+    watchlist = KR_WATCHLIST if is_kr else US_WATCHLIST
+    news_ticker = NEWS_TICKER_KR if is_kr else NEWS_TICKER_US
+
+    now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    embed = discord.Embed(
+        title=title,
+        description=f"기준: {now_kst} · 전일 종가 대비",
+        color=color,
+    )
+
+    # 1) 주요 종목 등락 Top 3
+    movers = fetch_top_movers(watchlist, n=3)
+    if movers:
+        lines = [_format_mover_line(m, korean=is_kr) for m in movers]
+        movers_value = "```ansi\n" + "\n".join(lines) + "\n```"
+    else:
+        movers_value = "데이터 없음"
+    embed.add_field(name="🔥 주요 종목 등락 (Top 3)", value=movers_value, inline=False)
+
+    # 2) 주요 뉴스 3개
+    news = fetch_news(news_ticker, n=3)
+    if news:
+        bullets = []
+        for i, n in enumerate(news, 1):
+            line = f"{i}. [{n['title']}]({n['link']})" if n["link"] else f"{i}. {n['title']}"
+            if n["publisher"]:
+                line += f" — *{n['publisher']}*"
+            bullets.append(line)
+        news_value = "\n".join(bullets)
+    else:
+        news_value = "뉴스 데이터 없음"
+    embed.add_field(name="📌 주요 뉴스", value=news_value, inline=False)
+
+    embed.set_footer(text="Source: Yahoo Finance (yfinance)")
+    return embed
+
+
 intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
@@ -136,6 +319,31 @@ async def post_market_update():
     log.info("게시 완료")
 
 
+async def build_summary_embed_async(market: str) -> discord.Embed:
+    """이슈 요약 임베드를 별도 스레드에서 생성 (yfinance 동기 호출 차단 방지)."""
+    return await asyncio.to_thread(build_summary_embed, market)
+
+
+async def post_summary(market: str):
+    channel = client.get_channel(CHANNEL_ID)
+    if channel is None:
+        log.error("채널 ID %s 를 찾을 수 없습니다.", CHANNEL_ID)
+        return
+    label = "한국" if market == "kr" else "미국"
+    log.info("%s 증시 요약 생성 중…", label)
+    embed = await build_summary_embed_async(market)
+    await channel.send(embed=embed)
+    log.info("%s 증시 요약 게시 완료", label)
+
+
+async def post_summary_kr():
+    await post_summary("kr")
+
+
+async def post_summary_us():
+    await post_summary("us")
+
+
 @tree.command(name="시세", description="현재 시장 시세를 즉시 보여줍니다")
 async def slash_quote(interaction: discord.Interaction):
     # 시세 조회는 몇 초 걸릴 수 있으니 먼저 응답 지연 처리 (3초 안에 ack 필수)
@@ -146,6 +354,28 @@ async def slash_quote(interaction: discord.Interaction):
     except Exception as e:
         log.exception("/시세 처리 중 오류")
         await interaction.followup.send(f"⚠️ 시세 조회 실패: {e}")
+
+
+@tree.command(name="이슈한국", description="한국 증시 이슈 요약 (Top 종목 + 뉴스)")
+async def slash_issue_kr(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        embed = await build_summary_embed_async("kr")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        log.exception("/이슈한국 처리 중 오류")
+        await interaction.followup.send(f"⚠️ 한국 증시 요약 실패: {e}")
+
+
+@tree.command(name="이슈미국", description="미국 증시 이슈 요약 (Top 종목 + 뉴스)")
+async def slash_issue_us(interaction: discord.Interaction):
+    await interaction.response.defer(thinking=True)
+    try:
+        embed = await build_summary_embed_async("us")
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        log.exception("/이슈미국 처리 중 오류")
+        await interaction.followup.send(f"⚠️ 미국 증시 요약 실패: {e}")
 
 
 @client.event
@@ -163,16 +393,38 @@ async def on_ready():
     except Exception as e:
         log.error("슬래시 명령어 동기화 실패: %s", e)
 
-    hour, minute = map(int, POST_TIME.split(":"))
+    # 1) 일일 시세 (기존)
+    h, m = map(int, POST_TIME.split(":"))
     scheduler.add_job(
         post_market_update,
-        CronTrigger(hour=hour, minute=minute, timezone=KST),
+        CronTrigger(hour=h, minute=m, timezone=KST),
         id="daily_market",
         replace_existing=True,
     )
+    log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST", h, m)
+
+    # 2) 한국 증시 요약 (코스피 NXT 마감 후)
+    kh, km = map(int, KR_SUMMARY_TIME.split(":"))
+    scheduler.add_job(
+        post_summary_kr,
+        CronTrigger(hour=kh, minute=km, timezone=KST),
+        id="summary_kr",
+        replace_existing=True,
+    )
+    log.info("스케줄 등록 완료(한국 요약): 매일 %02d:%02d KST", kh, km)
+
+    # 3) 미국 증시 요약 (미국 정규장 마감 후)
+    uh, um = map(int, US_SUMMARY_TIME.split(":"))
+    scheduler.add_job(
+        post_summary_us,
+        CronTrigger(hour=uh, minute=um, timezone=KST),
+        id="summary_us",
+        replace_existing=True,
+    )
+    log.info("스케줄 등록 완료(미국 요약): 매일 %02d:%02d KST", uh, um)
+
     if not scheduler.running:
         scheduler.start()
-    log.info("스케줄 등록 완료: 매일 %02d:%02d KST", hour, minute)
 
 
 if __name__ == "__main__":
