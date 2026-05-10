@@ -15,6 +15,11 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+try:
+    from anthropic import Anthropic
+except ImportError:
+    Anthropic = None
+
 load_dotenv()
 
 logging.basicConfig(
@@ -29,7 +34,15 @@ GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # 0이면 글로벌 sync (느림)
 POST_TIME = os.getenv("POST_TIME", "07:00")
 KR_SUMMARY_TIME = os.getenv("KR_SUMMARY_TIME", "20:00")  # 코스피 NXT 마감 후
 US_SUMMARY_TIME = os.getenv("US_SUMMARY_TIME", "06:00")  # 미국 정규장 마감 후
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 KST = pytz.timezone("Asia/Seoul")
+
+# Claude 클라이언트 (API 키가 있을 때만 활성화)
+_anthropic_client = (
+    Anthropic(api_key=ANTHROPIC_API_KEY)
+    if (Anthropic and ANTHROPIC_API_KEY)
+    else None
+)
 
 # (카테고리, [(표시이름, 야후 티커), ...])
 TICKER_GROUPS = [
@@ -251,6 +264,37 @@ def fetch_news(ticker: str, n: int = 3) -> list:
     return out
 
 
+def synthesize_news(news_items: list, market: str) -> str:
+    """3개 뉴스를 Claude로 한국어 한 단락 통합 요약. API 키 없으면 빈 문자열."""
+    if not _anthropic_client or not news_items:
+        return ""
+    market_label = "한국" if market == "kr" else "미국"
+    items_text = "\n\n".join(
+        f"[{i}] 제목: {n['title']}\n출처: {n.get('publisher', '')}\n본문 발췌: {n.get('summary', '')}"
+        for i, n in enumerate(news_items, 1)
+    )
+    prompt = (
+        f"다음은 오늘 {market_label} 증시 관련 주요 뉴스 {len(news_items)}개입니다. "
+        "각 뉴스의 핵심을 종합해 한국어로 자연스러운 한 단락(2~3문장, 250자 이내)으로 "
+        "오늘 시장의 핵심 흐름을 정리해 주세요. 다른 인사말이나 부연설명 없이 요약 단락만 응답하세요.\n\n"
+        f"{items_text}"
+    )
+    try:
+        msg = _anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = ""
+        for block in msg.content:
+            if getattr(block, "type", "") == "text":
+                text += block.text
+        return text.strip()
+    except Exception as e:
+        log.warning("synthesize_news 실패: %s", e)
+        return ""
+
+
 def _format_mover_line(m: dict, korean: bool) -> str:
     """top mover 한 줄 포맷. 한국 종목은 정수, 미국 종목은 소수 둘째 자리."""
     arrow = "🟢▲" if m["change"] > 0 else ("🔴▼" if m["change"] < 0 else "⬜➖")
@@ -285,25 +329,29 @@ def build_summary_embed(market: str) -> discord.Embed:
         movers_value = "데이터 없음"
     embed.add_field(name="🔥 주요 종목 등락 (Top 3)", value=movers_value, inline=False)
 
-    # 2) 주요 뉴스 3개 (제목 + 요약 + 링크)
+    # 2) AI 종합 요약 + 3) 뉴스 링크
     news = fetch_news(news_ticker, n=3)
     if news:
-        blocks = []
+        # 종합 요약 (Claude AI)
+        synthesis = synthesize_news(news, market)
+        if synthesis:
+            if len(synthesis) > 1020:
+                synthesis = synthesis[:1017] + "…"
+            embed.add_field(name="📰 종합 요약", value=synthesis, inline=False)
+
+        # 뉴스 링크 (제목 + 출처 + 클릭 가능한 링크)
+        bullets = []
         for i, n in enumerate(news, 1):
-            head = f"**{i}.** [{n['title']}]({n['link']})" if n["link"] else f"**{i}.** {n['title']}"
+            line = f"{i}. [{n['title']}]({n['link']})" if n["link"] else f"{i}. {n['title']}"
             if n["publisher"]:
-                head += f" — *{n['publisher']}*"
-            block = head
-            if n.get("summary"):
-                block += f"\n> {n['summary']}"
-            blocks.append(block)
-        news_value = "\n\n".join(blocks)
-        # Discord embed field 1024자 제한 보호
-        if len(news_value) > 1020:
-            news_value = news_value[:1017] + "…"
+                line += f" — *{n['publisher']}*"
+            bullets.append(line)
+        links_value = "\n".join(bullets)
+        if len(links_value) > 1020:
+            links_value = links_value[:1017] + "…"
+        embed.add_field(name="🔗 뉴스 링크", value=links_value, inline=False)
     else:
-        news_value = "뉴스 데이터 없음"
-    embed.add_field(name="📌 주요 뉴스", value=news_value, inline=False)
+        embed.add_field(name="📌 주요 뉴스", value="뉴스 데이터 없음", inline=False)
 
     embed.set_footer(text="Source: Yahoo Finance (yfinance)")
     return embed
