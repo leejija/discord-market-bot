@@ -225,16 +225,15 @@ def fetch_top_movers(tickers: list, n: int = 3) -> list:
     return results[:n]
 
 
-def fetch_news(ticker: str, n: int = 3) -> list:
-    """yfinance 뉴스에서 최근 n개 헤드라인 + 요약. 실패 시 빈 리스트."""
+def _fetch_news_for_ticker(ticker: str, n: int = 3) -> list:
+    """단일 티커의 yfinance 뉴스 n개. 각 항목: title/link/publisher/summary."""
     try:
         raw = yf.Ticker(ticker).news or []
     except Exception as e:
-        log.warning("fetch_news(%s) 실패: %s", ticker, e)
+        log.warning("_fetch_news_for_ticker(%s) 실패: %s", ticker, e)
         return []
     out = []
-    for item in raw[:n * 2]:  # 충분히 가져온 뒤 필터
-        # yfinance 신/구 응답 포맷 둘 다 호환
+    for item in raw[:n * 2]:
         content = item.get("content") if isinstance(item, dict) else None
         if isinstance(content, dict):
             title = content.get("title") or ""
@@ -254,8 +253,7 @@ def fetch_news(ticker: str, n: int = 3) -> list:
             continue
         if len(title) > 70:
             title = title[:67] + "…"
-        # 요약은 디스코드 임베드에 맞춰 짧게 자름 (한 줄 ~180자)
-        summary = " ".join(summary.split())  # 줄바꿈/중복 공백 정리
+        summary = " ".join(summary.split())
         if len(summary) > 180:
             summary = summary[:177] + "…"
         out.append({"title": title, "link": link, "publisher": publisher, "summary": summary})
@@ -264,25 +262,84 @@ def fetch_news(ticker: str, n: int = 3) -> list:
     return out
 
 
-def synthesize_news(news_items: list, market: str) -> str:
-    """3개 뉴스를 Claude로 한국어 한 단락 통합 요약. API 키 없으면 빈 문자열."""
-    if not _anthropic_client or not news_items:
+def fetch_related_news(movers: list, fallback_ticker: str, n: int = 5) -> list:
+    """top movers 각 종목당 1개씩 뉴스를 모아 n개 반환. 부족하면 fallback에서 채움.
+    각 항목: title/link/publisher/summary/related_ticker/related_name."""
+    out = []
+    used_titles = set()
+    # 1) 각 mover 종목당 첫 뉴스 1개씩
+    for m in movers:
+        items = _fetch_news_for_ticker(m["ticker"], n=2)
+        for item in items:
+            if item["title"] in used_titles:
+                continue
+            item["related_ticker"] = m["ticker"]
+            item["related_name"] = m["name"]
+            out.append(item)
+            used_titles.add(item["title"])
+            break
+        if len(out) >= n:
+            break
+    # 2) 부족하면 fallback(시장 인덱스 ETF)에서 채움
+    if len(out) < n:
+        items = _fetch_news_for_ticker(fallback_ticker, n=n * 2)
+        for item in items:
+            if item["title"] in used_titles:
+                continue
+            item["related_ticker"] = None
+            item["related_name"] = None
+            out.append(item)
+            used_titles.add(item["title"])
+            if len(out) >= n:
+                break
+    return out[:n]
+
+
+def synthesize_market(movers: list, news_items: list, market: str, korean: bool) -> str:
+    """종목 등락 Top + 관련 뉴스를 Claude로 종합 요약. API 키 없으면 빈 문자열."""
+    if not _anthropic_client or (not movers and not news_items):
         return ""
     market_label = "한국" if market == "kr" else "미국"
-    items_text = "\n\n".join(
-        f"[{i}] 제목: {n['title']}\n출처: {n.get('publisher', '')}\n본문 발췌: {n.get('summary', '')}"
-        for i, n in enumerate(news_items, 1)
-    )
+
+    # 가격 변동 블록
+    if movers:
+        movers_block_lines = []
+        for i, m in enumerate(movers, 1):
+            sign = "+" if m["pct"] >= 0 else ""
+            price_fmt = f"{m['last']:,.0f}" if korean else f"{m['last']:,.2f}"
+            movers_block_lines.append(
+                f"{i}. {m['name']} ({m['ticker']}): {price_fmt}, {sign}{m['pct']:.2f}%"
+            )
+        movers_block = "\n".join(movers_block_lines)
+    else:
+        movers_block = "(데이터 없음)"
+
+    # 뉴스 블록
+    if news_items:
+        news_block_lines = []
+        for i, n in enumerate(news_items, 1):
+            related = f" [관련: {n.get('related_name')}]" if n.get("related_name") else ""
+            news_block_lines.append(
+                f"{i}. 제목: {n['title']}{related}\n"
+                f"   출처: {n.get('publisher', '')}\n"
+                f"   본문 발췌: {n.get('summary', '')}"
+            )
+        news_block = "\n\n".join(news_block_lines)
+    else:
+        news_block = "(데이터 없음)"
+
     prompt = (
-        f"다음은 오늘 {market_label} 증시 관련 주요 뉴스 {len(news_items)}개입니다. "
-        "각 뉴스의 핵심을 종합해 한국어로 자연스러운 한 단락(2~3문장, 250자 이내)으로 "
-        "오늘 시장의 핵심 흐름을 정리해 주세요. 다른 인사말이나 부연설명 없이 요약 단락만 응답하세요.\n\n"
-        f"{items_text}"
+        f"다음은 오늘 {market_label} 증시의 주요 종목 등락과 관련 뉴스입니다.\n\n"
+        f"📊 주요 종목 등락 (Top {len(movers)}):\n{movers_block}\n\n"
+        f"📰 관련 뉴스 ({len(news_items)}건):\n{news_block}\n\n"
+        "위 가격 변동 데이터와 뉴스 내용을 종합하여, 오늘 시장의 핵심 흐름과 "
+        "주요 종목의 움직임 배경을 한국어로 자연스러운 한 단락(3~4문장, 350자 이내)으로 "
+        "정리해 주세요. 인사말이나 부연설명 없이 요약 단락만 응답하세요."
     )
     try:
         msg = _anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=400,
+            max_tokens=600,
             messages=[{"role": "user", "content": prompt}],
         )
         text = ""
@@ -291,7 +348,7 @@ def synthesize_news(news_items: list, market: str) -> str:
                 text += block.text
         return text.strip()
     except Exception as e:
-        log.warning("synthesize_news 실패: %s", e)
+        log.warning("synthesize_market 실패: %s", e)
         return ""
 
 
@@ -320,31 +377,38 @@ def build_summary_embed(market: str) -> discord.Embed:
         color=color,
     )
 
-    # 1) 주요 종목 등락 Top 3
-    movers = fetch_top_movers(watchlist, n=3)
+    # 1) 주요 종목 등락 Top 5
+    movers = fetch_top_movers(watchlist, n=5)
     if movers:
         lines = [_format_mover_line(m, korean=is_kr) for m in movers]
         movers_value = "```ansi\n" + "\n".join(lines) + "\n```"
     else:
         movers_value = "데이터 없음"
-    embed.add_field(name="🔥 주요 종목 등락 (Top 3)", value=movers_value, inline=False)
+    embed.add_field(name="🔥 주요 종목 등락 (Top 5)", value=movers_value, inline=False)
 
-    # 2) AI 종합 요약 + 3) 뉴스 링크
-    news = fetch_news(news_ticker, n=3)
-    if news:
-        # 종합 요약 (Claude AI)
-        synthesis = synthesize_news(news, market)
+    # 2) Top 5 종목과 연관된 뉴스 5개 (각 종목당 1개씩, 부족하면 인덱스 ETF로 채움)
+    news = fetch_related_news(movers, fallback_ticker=news_ticker, n=5)
+
+    # 3) AI 종합 요약 (등락 + 뉴스를 모두 종합)
+    if movers or news:
+        synthesis = synthesize_market(movers, news, market, korean=is_kr)
         if synthesis:
             if len(synthesis) > 1020:
                 synthesis = synthesis[:1017] + "…"
             embed.add_field(name="📰 종합 요약", value=synthesis, inline=False)
 
-        # 뉴스 링크 (제목 + 출처 + 클릭 가능한 링크)
+    # 4) 뉴스 링크 5개
+    if news:
         bullets = []
         for i, n in enumerate(news, 1):
             line = f"{i}. [{n['title']}]({n['link']})" if n["link"] else f"{i}. {n['title']}"
-            if n["publisher"]:
-                line += f" — *{n['publisher']}*"
+            extras = []
+            if n.get("publisher"):
+                extras.append(f"*{n['publisher']}*")
+            if n.get("related_name"):
+                extras.append(f"`{n['related_name']}`")
+            if extras:
+                line += " — " + " · ".join(extras)
             bullets.append(line)
         links_value = "\n".join(bullets)
         if len(links_value) > 1020:
