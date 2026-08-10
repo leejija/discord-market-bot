@@ -33,9 +33,8 @@ log = logging.getLogger("market-bot")
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID", "0"))
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # 0이면 글로벌 sync (느림)
-POST_TIME = os.getenv("POST_TIME", "07:00")
-KR_SUMMARY_TIME = os.getenv("KR_SUMMARY_TIME", "20:00")  # 코스피 NXT 마감 후
-US_SUMMARY_TIME = os.getenv("US_SUMMARY_TIME", "06:00")  # 미국 정규장 마감 후
+# 쉼표로 여러 시각 지정 가능 (예: "07:00,16:00")
+POST_TIME = os.getenv("POST_TIME", "07:00,16:00")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 KST = pytz.timezone("Asia/Seoul")
 
@@ -573,15 +572,23 @@ async def on_ready():
     except Exception as e:
         log.error("슬래시 명령어 동기화 실패: %s", e)
 
-    # 일일 시세 (매일 07:00 KST 기본)
-    h, m = map(int, POST_TIME.split(":"))
-    scheduler.add_job(
-        post_market_update,
-        CronTrigger(hour=h, minute=m, timezone=KST),
-        id="daily_market",
-        replace_existing=True,
-    )
-    log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST", h, m)
+    # 일일 시세 — POST_TIME에 쉼표로 여러 시각을 지정할 수 있음 (기본 07:00, 16:00)
+    for idx, slot in enumerate(POST_TIME.split(",")):
+        slot = slot.strip()
+        if not slot:
+            continue
+        try:
+            h, m = map(int, slot.split(":"))
+        except ValueError:
+            log.error("POST_TIME 형식 오류로 건너뜀: %r (HH:MM 형식이어야 함)", slot)
+            continue
+        scheduler.add_job(
+            post_market_update,
+            CronTrigger(hour=h, minute=m, timezone=KST),
+            id=f"daily_market_{idx}",
+            replace_existing=True,
+        )
+        log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST", h, m)
 
     if not scheduler.running:
         scheduler.start()
