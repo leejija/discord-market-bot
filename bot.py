@@ -223,10 +223,18 @@ def format_line(name: str, q: Optional[dict]) -> str:
     )
 
 
-def build_embed() -> discord.Embed:
+def session_label_for_hour(hour: int) -> str:
+    """게시 시각에 맞는 장 마감 문구. 오전이면 미국장, 오후면 한국장 기준."""
+    return "미국 정규장 종료" if hour < 12 else "한국 정규장 종료"
+
+
+def build_embed(session_label: Optional[str] = None) -> discord.Embed:
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+    title = "📊 오늘의 시장 시세"
+    if session_label:
+        title += f" ({session_label})"
     embed = discord.Embed(
-        title="📊 오늘의 시장 시세",
+        title=title,
         description=f"기준: {now_kst} · 전일 종가 대비",
         color=0x2ecc71,
     )
@@ -477,18 +485,18 @@ tree = discord.app_commands.CommandTree(client)
 scheduler = AsyncIOScheduler(timezone=KST)
 
 
-async def build_embed_async() -> discord.Embed:
+async def build_embed_async(session_label: Optional[str] = None) -> discord.Embed:
     """yfinance는 동기 라이브러리라서 이벤트 루프를 막지 않도록 스레드에서 실행."""
-    return await asyncio.to_thread(build_embed)
+    return await asyncio.to_thread(build_embed, session_label)
 
 
-async def post_market_update():
+async def post_market_update(session_label: Optional[str] = None):
     channel = client.get_channel(CHANNEL_ID)
     if channel is None:
         log.error("채널 ID %s 를 찾을 수 없습니다.", CHANNEL_ID)
         return
-    log.info("시세 임베드 생성 중…")
-    embed = await build_embed_async()
+    log.info("시세 임베드 생성 중… (%s)", session_label or "라벨 없음")
+    embed = await build_embed_async(session_label)
     await channel.send(embed=embed)
     log.info("게시 완료")
 
@@ -523,7 +531,8 @@ async def slash_quote(interaction: discord.Interaction):
     # 시세 조회는 몇 초 걸릴 수 있으니 먼저 응답 지연 처리 (3초 안에 ack 필수)
     await interaction.response.defer(thinking=True)
     try:
-        embed = await build_embed_async()
+        label = session_label_for_hour(datetime.now(KST).hour)
+        embed = await build_embed_async(label)
         await interaction.followup.send(embed=embed)
     except Exception as e:
         log.exception("/시세 처리 중 오류")
@@ -582,13 +591,15 @@ async def on_ready():
         except ValueError:
             log.error("POST_TIME 형식 오류로 건너뜀: %r (HH:MM 형식이어야 함)", slot)
             continue
+        label = session_label_for_hour(h)
         scheduler.add_job(
             post_market_update,
             CronTrigger(hour=h, minute=m, timezone=KST),
+            args=[label],
             id=f"daily_market_{idx}",
             replace_existing=True,
         )
-        log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST", h, m)
+        log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST — %s", h, m, label)
 
     if not scheduler.running:
         scheduler.start()
