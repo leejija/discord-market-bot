@@ -3,8 +3,10 @@ Discord 시장 시세 봇
 - 미국/한국 대표 지수, 원유 선물, 미국/한국 단기·장기 국채 시세를 매일 자동 게시
 """
 import os
+import re
 import asyncio
 import logging
+import urllib.request
 from datetime import datetime
 from typing import Optional
 
@@ -66,14 +68,14 @@ TICKER_GROUPS = [
         ("엔화/원", "JPYKRW=X"),
         ("위안/원", "CNYKRW=X"),
     ]),
-    # 국채는 가격 변동을 보기 위해 ETF를 사용 (yield가 아닌 price 기준)
-    ("미국 국채", [
-        ("미국 단기채", "SHY"),
-        ("미국 장기채", "TLT"),
+    # 미국 국채: 10년물 실제 금리(%) — ^TNX 는 4.35 처럼 수익률 자체를 반환
+    ("미국 국채 금리", [
+        ("미국 10년물 (%)", "^TNX"),
     ]),
-    ("한국 국채", [
-        ("한국 단기채", "114470.KS"),
-        ("한국 장기채", "167860.KS"),
+    # 한국 금리: 네이버 금융 시장지표 스크래핑 (국고채 10년물은 네이버 미제공)
+    ("한국 국채 금리", [
+        ("국고채 3년 (%)", "naver:IRR_GOVT03Y"),
+        ("회사채 3년 (%)", "naver:IRR_CORP03Y"),
     ]),
 ]
 
@@ -137,6 +139,55 @@ NEWS_TICKER_US = "SPY"
 NEWS_TICKER_KR = "EWY"
 
 
+def fetch_naver_rate(market_index_cd: str) -> Optional[dict]:
+    """네이버 금융 시장지표에서 국내 금리(%)를 가져온다.
+    반환 형태는 fetch_quote와 동일: {"last", "change", "pct"}.
+    last/change 단위는 %(퍼센트포인트)."""
+    url = (
+        "https://finance.naver.com/marketindex/interestDailyQuote.naver"
+        f"?marketindexCd={market_index_cd}"
+    )
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        html = urllib.request.urlopen(req, timeout=15).read().decode("euc-kr", errors="replace")
+    except Exception as e:
+        log.warning("fetch_naver_rate(%s) 요청 실패: %s", market_index_cd, e)
+        return None
+
+    # 최신 행 하나만 파싱: <tr class="up|down|same2"> ... <td class="num">금리</td>
+    #                     <td class="num"><img alt=...> 변동폭</td>
+    m = re.search(
+        r'<tr class="(up|down|same2?)">.*?'
+        r'<td class="num">([\d.]+)</td>.*?'
+        r'<td class="num">.*?([\d.]+)\s*</td>',
+        html,
+        re.S,
+    )
+    if not m:
+        log.warning("fetch_naver_rate(%s) 파싱 실패", market_index_cd)
+        return None
+
+    direction, last_s, delta_s = m.group(1), m.group(2), m.group(3)
+    try:
+        last = float(last_s)
+        delta = float(delta_s)
+    except ValueError:
+        return None
+
+    change = -delta if direction == "down" else (delta if direction == "up" else 0.0)
+    prev = last - change
+    pct = (change / prev) * 100 if prev else 0.0
+    return {"last": last, "change": change, "pct": pct}
+
+
+def fetch_any(ticker: str) -> Optional[dict]:
+    """티커 문자열에 따라 적절한 소스로 분기.
+    'naver:CODE' 형식이면 네이버 금융, 그 외는 야후 파이낸스."""
+    if ticker.startswith("naver:"):
+        return fetch_naver_rate(ticker.split(":", 1)[1])
+    return fetch_quote(ticker)
+
+
 def fetch_quote(ticker: str) -> Optional[dict]:
     """야후 파이낸스에서 최근 2거래일 종가를 받아 변동률 계산."""
     try:
@@ -181,7 +232,7 @@ def build_embed() -> discord.Embed:
         color=0x2ecc71,
     )
     for category, items in TICKER_GROUPS:
-        lines = [format_line(name, fetch_quote(tk)) for name, tk in items]
+        lines = [format_line(name, fetch_any(tk)) for name, tk in items]
         value = "```ansi\n" + "\n".join(lines) + "\n```"
         embed.add_field(name=f"**{category}**", value=value, inline=False)
     embed.set_footer(text="Source: Yahoo Finance (yfinance)")
@@ -522,7 +573,7 @@ async def on_ready():
     except Exception as e:
         log.error("슬래시 명령어 동기화 실패: %s", e)
 
-    # 1) 일일 시세 (기존)
+    # 일일 시세 (매일 07:00 KST 기본)
     h, m = map(int, POST_TIME.split(":"))
     scheduler.add_job(
         post_market_update,
@@ -531,26 +582,6 @@ async def on_ready():
         replace_existing=True,
     )
     log.info("스케줄 등록 완료(시세): 매일 %02d:%02d KST", h, m)
-
-    # 2) 한국 증시 요약 (코스피 NXT 마감 후)
-    kh, km = map(int, KR_SUMMARY_TIME.split(":"))
-    scheduler.add_job(
-        post_summary_kr,
-        CronTrigger(hour=kh, minute=km, timezone=KST),
-        id="summary_kr",
-        replace_existing=True,
-    )
-    log.info("스케줄 등록 완료(한국 요약): 매일 %02d:%02d KST", kh, km)
-
-    # 3) 미국 증시 요약 (미국 정규장 마감 후)
-    uh, um = map(int, US_SUMMARY_TIME.split(":"))
-    scheduler.add_job(
-        post_summary_us,
-        CronTrigger(hour=uh, minute=um, timezone=KST),
-        id="summary_us",
-        replace_existing=True,
-    )
-    log.info("스케줄 등록 완료(미국 요약): 매일 %02d:%02d KST", uh, um)
 
     if not scheduler.running:
         scheduler.start()
